@@ -1,0 +1,66 @@
+name: Mirror LEC desktop releases
+
+# The source repository is private. This workflow mirrors the installers that
+# are already published publicly on the LEC CDN into GitHub Releases here, so
+# downloads are available without any credentials. It needs no secrets.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 */6 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read published version from the CDN
+        id: manifest
+        run: |
+          set -euo pipefail
+          curl -fsS --retry 3 https://web.lec.pxysio.top/updates/latest.yml -o latest.yml
+          version="$(grep -m1 '^version:' latest.yml | awk '{print $2}')"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "mirroring version $version"
+
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="desktop-v${{ steps.manifest.outputs.version }}"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --title "LEC Desktop ${{ steps.manifest.outputs.version }}" \
+              --notes "Installers for LEC Desktop ${{ steps.manifest.outputs.version }}. Unsigned builds: Windows SmartScreen -> More info -> Run anyway; macOS first launch needs right-click -> Open."
+          fi
+
+      - name: Download installers from the CDN
+        run: |
+          set -euo pipefail
+          v="${{ steps.manifest.outputs.version }}"
+          mkdir -p dl
+          for f in \
+            "LEC-$v-win-x64.exe" "LEC-$v-win-arm64.exe" \
+            "LEC-$v-mac-x64.dmg" "LEC-$v-mac-arm64.dmg" \
+            "LEC-$v-linux-x86_64.AppImage" "LEC-$v-linux-amd64.deb" \
+            "latest.yml" "latest-mac.yml" "latest-linux.yml"
+          do
+            if curl -fsS --retry 3 -o "dl/$f" "https://web.lec.pxysio.top/updates/$f"; then
+              echo "fetched $f"
+            else
+              echo "::warning::missing on the CDN: $f"
+            fi
+          done
+          ls -la dl
+
+      - name: Upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="desktop-v${{ steps.manifest.outputs.version }}"
+          gh release upload "$tag" dl/* --clobber --repo "$GITHUB_REPOSITORY"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.size)"'
