@@ -60,7 +60,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           tag="desktop-v${{ steps.manifest.outputs.version }}"
-          gh release upload "$tag" dl/* --clobber --repo "$GITHUB_REPOSITORY"
+          # Upload smallest first so manifests and the Windows installers land
+          # even if a large asset hits GitHub's occasional 500s. Per-asset
+          # retries; a persistent failure is a warning, not a job failure.
+          mapfile -t files < <(ls -S dl/* | tac)
+          failed=0
+          for f in "${files[@]}"; do
+            name="$(basename "$f")"
+            ok=0
+            for attempt in 1 2 3; do
+              if gh release upload "$tag" "$f" --clobber --repo "$GITHUB_REPOSITORY"; then ok=1; break; fi
+              echo "::warning::upload attempt $attempt failed for $name"
+              sleep $((attempt * 10))
+            done
+            if [ "$ok" -ne 1 ]; then
+              echo "::warning::could not upload $name after 3 attempts"
+              failed=$((failed + 1))
+            fi
+          done
+          echo "--- final assets ---"
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.size)"'
+          echo "assets failed: $failed"
